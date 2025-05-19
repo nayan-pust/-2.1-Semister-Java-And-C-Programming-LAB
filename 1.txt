@@ -1,0 +1,143 @@
+% Generate random message
+msg = round(rand(1, 1000));
+
+% 1/2 rate convolutional encoder
+trellis = poly2trellis(3, [6 7]);
+user = convenc(msg, trellis);
+
+% Map 0 -> -1 for BPSK NRZ format
+user(user == 0) = -1;
+
+fc = 5000; % Carrier frequency (Hz)
+eb = 0.5;  % Energy per bit
+bitrate = 1000; % Bitrate in Hz
+tb = 1/bitrate; % Bit duration
+chiprate = 10000;
+tc = 1/chiprate;
+
+length_user = length(user);
+t = tc:tc:tb*length_user;
+
+% Baseband signal generation
+samples_per_bit = tb / tc;
+basebandsig = zeros(1, length_user * samples_per_bit);
+for i = 1:length_user
+    basebandsig((i-1)*samples_per_bit + 1:i*samples_per_bit) = user(i);
+end
+
+figure(1)
+stairs(t(1:800), basebandsig(1:800))
+xlabel('Time(sec)')
+ylabel('Binary value')
+set(gca, 'ytick', [ -1  1 ])
+title('A segment of original binary sequence for a single user')
+
+% BPSK Modulation
+bpskmod = zeros(1, length_user * samples_per_bit);
+index = 1;
+for i = 1:length_user
+    for j = tc:tc:tb
+        bpskmod(index) = sqrt(2*eb) * user(i) * cos(2*pi*fc*j);
+        index = index + 1;
+    end
+end
+
+number = length(t);
+spectrum = abs(fft(bpskmod));
+sampling_frequency = 2*fc;
+sampling_interval = 1.0 / sampling_frequency;
+nyquest_frequency = 1.0 / (2.0 * sampling_interval);
+frequency = (1.0 / (number * sampling_interval)) .* (1:number);
+
+figure(2)
+plot(frequency, spectrum)
+title('Frequency Domain analysis of BPSK modulated signal for a single user')
+xlabel('Frequency (Hz)')
+ylabel('Magnitude')
+grid on
+
+% PN Generator (seed: 1000 mapped to [1 -1 1 -1])
+seed = [1 -1 1 -1];
+pn = zeros(1, length_user * 10);
+for i = 1:length_user
+    for j = 1:10
+        idx = (i-1)*10 + j;
+        pn(idx) = seed(4);
+        if seed(4) == seed(3)
+            temp = -1;
+        else
+            temp = 1;
+        end
+        seed(4) = seed(3);
+        seed(3) = seed(2);
+        seed(2) = seed(1);
+        seed(1) = temp;
+    end
+end
+
+% Upsample PN sequence
+pnupsampled = zeros(1, length(pn) * samples_per_bit / 10);
+for i = 1:length(pn)
+    start_idx = (i-1)*(samples_per_bit/10) + 1;
+    end_idx = i*(samples_per_bit/10);
+    pnupsampled(start_idx:end_idx) = pn(i);
+end
+
+% Multiply with modulated signal
+sigtx = bpskmod .* pnupsampled;
+
+figure(3)
+plot(t(1:200), sigtx(1:200))
+title('A segment of Transmitted  DS CDMA signal')
+xlabel('Time(sec)')
+ylabel('Amplitude')
+grid on
+
+% AWGN Channel and BER simulation
+snr_in_dBs = 0:1:10;
+ber = zeros(1, length(snr_in_dBs));
+samples_per_symbol = samples_per_bit;
+
+for m = 1:length(snr_in_dBs)
+    composite_signal = awgn(sigtx, snr_in_dBs(m), 'measured');
+
+    % Despread
+    rx = composite_signal .* pnupsampled;
+
+    % BPSK Demodulation
+    demodcar = zeros(1, length_user * samples_per_bit);
+    index = 1;
+    for i = 1:length_user
+        for j = tc:tc:tb
+            demodcar(index) = sqrt(2*eb) * cos(2*pi*fc*j);
+            index = index + 1;
+        end
+    end
+
+    bpskdemod = rx .* demodcar;
+
+    % Integrate over each bit (10 chips per bit)
+    sumval = zeros(1, length_user);
+    for i = 1:length_user
+        sumval(i) = sum(bpskdemod((i-1)*samples_per_bit + 1:i*samples_per_bit));
+    end
+
+    % Decision
+    rxbits = zeros(1, length_user);
+    rxbits(sumval > 0) = 1;
+
+    % Viterbi decoding
+    tblen = 3;
+    delay = tblen;
+    decoded = vitdec(rxbits, trellis, tblen, 'cont', 'hard');
+    [~, rat] = biterr(decoded(delay+1:end), msg(1:end-delay));
+    ber(m) = rat;
+end
+
+figure(4)
+plot(snr_in_dBs, ber);
+xlabel('Signal to noise ratio(dB)');
+ylabel('BER');
+legend('BER simulation for a single user');
+title('Coded BER simulation under AWGN channel');
+grid on
